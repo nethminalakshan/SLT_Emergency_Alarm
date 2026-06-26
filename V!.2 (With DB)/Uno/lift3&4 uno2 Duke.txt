@@ -1,0 +1,150 @@
+#include <SPI.h>
+#include <Ethernet.h>
+#include <PubSubClient.h>
+
+// ---------- Ethernet (UNO2 - Duke Side) ----------
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x02 };   // unique MAC for UNO2
+IPAddress ip(192, 168, 1, 102);                       // static IP for UNO2
+
+// ---------- MQTT ----------
+const char* mqtt_server = "broker.hivemq.com";
+EthernetClient ethClient;
+PubSubClient client(ethClient);
+
+// ---------- Buttons (Duke Side) ----------
+const int lift3Pin = A5;   // Lift 3 button
+const int lift4Pin = A4;   // Lift 4 button
+
+// ---------- LEDs ----------
+const int LED_POWER = 6;   // Power indicator LED
+const int LED_ETH   = 7;   // Ethernet status LED
+
+// ---------- Ethernet LED blink ----------
+const unsigned long ETH_BLINK_MS = 500;
+unsigned long lastEthBlink = 0;
+bool ethLedState = false;
+
+// ---------- Timings ----------
+const unsigned long CHECK_DELAY   = 300;    // ms
+const unsigned long HEARTBEAT_MS  = 10000;  // 10 seconds
+const unsigned long MQTT_RETRY_MS = 5000;   // 5 seconds
+
+// ---------- State ----------
+bool lastLift3 = false;
+bool lastLift4 = false;
+unsigned long lastHeartbeat = 0;
+unsigned long lastMQTTTry = 0;
+
+// ---------- Publish helper ----------
+void publishLift(const char* topic, bool state) {
+  client.publish(topic, state ? "ON" : "OFF", true); // retained = true
+}
+
+// ---------- Ethernet LED update ----------
+void updateEthernetLed() {
+  if (Ethernet.linkStatus() == LinkON) {
+    digitalWrite(LED_ETH, HIGH);   // solid ON when cable connected
+    return;
+  }
+
+  // blink when cable disconnected
+  if (millis() - lastEthBlink >= ETH_BLINK_MS) {
+    lastEthBlink = millis();
+    ethLedState = !ethLedState;
+    digitalWrite(LED_ETH, ethLedState);
+  }
+}
+
+// ---------- MQTT reconnect (non-blocking) ----------
+void reconnectMQTT() {
+  if (millis() - lastMQTTTry < MQTT_RETRY_MS) return;
+  lastMQTTTry = millis();
+
+  Serial.print("Connecting MQTT...");
+  if (client.connect("UNO2_Duke")) {
+    Serial.println("connected");
+
+    // publish current states once connected
+    publishLift("test/relay/uno2/lift3", lastLift3);
+    publishLift("test/relay/uno2/lift4", lastLift4);
+
+    // publish heartbeat too
+    client.publish("test/relay/uno2/status", "ALIVE", true);
+  } else {
+    Serial.print("failed, rc=");
+    Serial.println(client.state());
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  // ---------- LEDs ----------
+  pinMode(LED_POWER, OUTPUT);
+  pinMode(LED_ETH, OUTPUT);
+
+  digitalWrite(LED_POWER, HIGH); // power LED always ON
+  digitalWrite(LED_ETH, LOW);
+
+  // Buttons wired to GND, use internal pull-ups (pressed = ON)
+  pinMode(lift3Pin, INPUT_PULLUP);
+  pinMode(lift4Pin, INPUT_PULLUP);
+
+  // Start Ethernet
+  Serial.println("Starting Ethernet...");
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("DHCP failed, using static IP");
+    Ethernet.begin(mac, ip);
+  }
+  delay(2000);
+
+  Serial.print("UNO2 IP: ");
+  Serial.println(Ethernet.localIP());
+
+  client.setServer(mqtt_server, 1883);
+
+  // Read initial states
+  lastLift3 = !digitalRead(lift3Pin); // pressed=LOW => ON
+  lastLift4 = !digitalRead(lift4Pin);
+
+  // Try initial MQTT connect and publish once
+  if (client.connect("UNO2_Duke")) {
+    publishLift("test/relay/uno2/lift3", lastLift3);
+    publishLift("test/relay/uno2/lift4", lastLift4);
+    client.publish("test/relay/uno2/status", "ALIVE", true);
+  }
+}
+
+void loop() {
+  // ---------- Ethernet LED ----------
+  updateEthernetLed();
+
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+
+  // Read buttons (pressed = ON)
+  bool cur3 = !digitalRead(lift3Pin);
+  bool cur4 = !digitalRead(lift4Pin);
+
+  // Lift 3
+  if (cur3 != lastLift3) {
+    lastLift3 = cur3;
+    if (client.connected()) publishLift("test/relay/uno2/lift3", cur3);
+    Serial.print("UNO2 Lift3: "); Serial.println(cur3 ? "ON" : "OFF");
+  }
+
+  // Lift 4
+  if (cur4 != lastLift4) {
+    lastLift4 = cur4;
+    if (client.connected()) publishLift("test/relay/uno2/lift4", cur4);
+    Serial.print("UNO2 Lift4: "); Serial.println(cur4 ? "ON" : "OFF");
+  }
+
+  // Heartbeat
+  if (client.connected() && millis() - lastHeartbeat >= HEARTBEAT_MS) {
+    lastHeartbeat = millis();
+    client.publish("test/relay/uno2/status", "ALIVE", true);
+  }
+
+  delay(CHECK_DELAY);
+}

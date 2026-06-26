@@ -1,0 +1,95 @@
+#include <SPI.h>
+#include <Ethernet.h>
+#include <PubSubClient.h>
+
+// =====================
+// Ethernet configuration
+// =====================
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+IPAddress ip(192, 168, 1, 13); // Set your static IP
+
+// =====================
+// MQTT configuration
+// =====================
+const char* mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
+
+EthernetClient ethClient;
+PubSubClient client(ethClient);
+
+// =====================
+// Relay sensing
+// =====================
+const int relayPin = A5;       // Analog pin A5
+const float onThreshold = 4.5; // Voltage threshold to consider ON
+const int checkDelay = 1000;   // 1-second check interval
+
+bool lastState = false;        // false=OFF, true=ON
+
+// =====================
+// MQTT reconnect
+// =====================
+unsigned long lastTry = 0;
+
+void reconnectMQTT() {
+  if (millis() - lastTry < 5000) return; // retry every 5 seconds
+  lastTry = millis();
+
+  Serial.print("Connecting MQTT...");
+  if (client.connect("UNO_Relay_Client")) {
+    Serial.println("connected");
+  } else {
+    Serial.print("failed, rc=");
+    Serial.println(client.state());
+  }
+}
+
+// =====================
+// Setup
+// =====================
+void setup() {
+  Serial.begin(9600);
+  pinMode(relayPin, INPUT);
+
+  // Start Ethernet
+  Serial.println("Starting Ethernet...");
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("DHCP failed, using static IP.");
+    Ethernet.begin(mac, ip);
+  }
+  delay(2000);
+  Serial.print("IP: ");
+  Serial.println(Ethernet.localIP());
+
+  // Setup MQTT server
+  client.setServer(mqtt_server, mqtt_port);
+}
+
+// =====================
+// Main loop
+// =====================
+void loop() {
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+
+  // Read relay voltage from A5
+  int sensorValue = analogRead(relayPin);
+  float voltage = sensorValue * (5.0 / 1023.0); // convert to volts
+
+  bool currentState = (voltage >= onThreshold);
+
+  // Send MQTT only if state changed
+  if (currentState != lastState) {
+    lastState = currentState;
+    String stateStr = (currentState) ? "ON" : "OFF";
+
+    if (client.connected()) {
+      client.publish("test/relay", stateStr.c_str());
+      Serial.println("MQTT published: " + stateStr + " (Voltage: " + String(voltage) + "V)");
+    } else {
+      Serial.println("MQTT not connected, skipped publish");
+    }
+  }
+
+  delay(checkDelay); // wait 1 second before next reading
+}

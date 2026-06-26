@@ -1,0 +1,148 @@
+#include <SPI.h>
+#include <Ethernet.h>
+#include <PubSubClient.h>
+
+// ---------- Ethernet (UNO1 - Lotus Side) ----------
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x01 };
+IPAddress ip(192, 168, 1, 101);
+
+// ---------- MQTT ----------
+const char* mqtt_server = "broker.hivemq.com";
+EthernetClient ethClient;
+PubSubClient client(ethClient);
+
+// ---------- Buttons ----------
+const int lift1Pin = A5;
+const int lift2Pin = A4;
+
+// ---------- LEDs ----------
+const int LED_POWER = 6;
+const int LED_ETH   = 7;
+
+// ---------- Ethernet LED blink ----------
+const unsigned long ETH_BLINK_MS = 500;
+unsigned long lastEthBlink = 0;
+bool ethLedState = false;
+
+// ---------- Timings ----------
+const unsigned long CHECK_DELAY   = 300;
+const unsigned long HEARTBEAT_MS  = 10000;
+const unsigned long MQTT_RETRY_MS = 5000;
+
+// ---------- State ----------
+bool lastLift1 = false;
+bool lastLift2 = false;
+unsigned long lastHeartbeat = 0;
+unsigned long lastMQTTTry = 0;
+
+// ---------- Publish helpers ----------
+void publishLift(const char* topic, bool state) {
+  client.publish(topic, state ? "ON" : "OFF", true);
+}
+
+// ---------- Ethernet LED ----------
+void updateEthernetLed() {
+  if (Ethernet.linkStatus() == LinkON) {
+    digitalWrite(LED_ETH, HIGH); // solid ON when link OK
+    return;
+  }
+
+  // blink when link down
+  if (millis() - lastEthBlink >= ETH_BLINK_MS) {
+    lastEthBlink = millis();
+    ethLedState = !ethLedState;
+    digitalWrite(LED_ETH, ethLedState);
+  }
+}
+
+// ---------- MQTT reconnect ----------
+void reconnectMQTT() {
+  if (millis() - lastMQTTTry < MQTT_RETRY_MS) return;
+  lastMQTTTry = millis();
+
+  Serial.print("Connecting MQTT...");
+  if (client.connect("UNO1_Lotus")) {
+    Serial.println("connected");
+
+    publishLift("test/relay/uno1/lift1", lastLift1);
+    publishLift("test/relay/uno1/lift2", lastLift2);
+    client.publish("test/relay/uno1/status", "ALIVE", true);
+  } else {
+    Serial.print("failed, rc=");
+    Serial.println(client.state());
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  // ---------- LEDs ----------
+  pinMode(LED_POWER, OUTPUT);
+  pinMode(LED_ETH, OUTPUT);
+
+  digitalWrite(LED_POWER, HIGH); // power always ON
+  digitalWrite(LED_ETH, LOW);
+
+  // ---------- Buttons ----------
+  pinMode(lift1Pin, INPUT_PULLUP);
+  pinMode(lift2Pin, INPUT_PULLUP);
+
+  // ---------- Ethernet ----------
+  Serial.println("Starting Ethernet...");
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("DHCP failed, using static IP");
+    Ethernet.begin(mac, ip);
+  }
+  delay(2000);
+
+  Serial.print("UNO1 IP: ");
+  Serial.println(Ethernet.localIP());
+
+  client.setServer(mqtt_server, 1883);
+
+  // ---------- Initial states ----------
+  lastLift1 = !digitalRead(lift1Pin);
+  lastLift2 = !digitalRead(lift2Pin);
+
+  if (client.connect("UNO1_Lotus")) {
+    publishLift("test/relay/uno1/lift1", lastLift1);
+    publishLift("test/relay/uno1/lift2", lastLift2);
+    client.publish("test/relay/uno1/status", "ALIVE", true);
+  }
+}
+
+void loop() {
+  // ---------- Ethernet LED ----------
+  updateEthernetLed();
+
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+
+  // ---------- Read buttons ----------
+  bool cur1 = !digitalRead(lift1Pin);
+  bool cur2 = !digitalRead(lift2Pin);
+
+  // ---------- Lift 1 ----------
+  if (cur1 != lastLift1) {
+    lastLift1 = cur1;
+    if (client.connected()) publishLift("test/relay/uno1/lift1", cur1);
+    Serial.print("UNO1 Lift1: ");
+    Serial.println(cur1 ? "ON" : "OFF");
+  }
+
+  // ---------- Lift 2 ----------
+  if (cur2 != lastLift2) {
+    lastLift2 = cur2;
+    if (client.connected()) publishLift("test/relay/uno1/lift2", cur2);
+    Serial.print("UNO1 Lift2: ");
+    Serial.println(cur2 ? "ON" : "OFF");
+  }
+
+  // ---------- Heartbeat ----------
+  if (client.connected() && millis() - lastHeartbeat >= HEARTBEAT_MS) {
+    lastHeartbeat = millis();
+    client.publish("test/relay/uno1/status", "ALIVE", true);
+  }
+
+  delay(CHECK_DELAY);
+}

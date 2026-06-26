@@ -1,0 +1,151 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <HTTPClient.h>
+#include <WebServer.h>
+
+// ---------- WiFi ----------
+const char* ssid = "ACCESS DENIED";
+const char* password = "power@SLT2023";
+
+// ---------- Static IP ----------
+IPAddress local_IP(192,168,1,13);
+IPAddress gateway(192,168,1,1);
+IPAddress subnet(255,255,255,0);
+IPAddress dns(8,8,8,8);
+
+// ---------- MQTT ----------
+const char* mqtt_server = "broker.hivemq.com";
+const char* mqtt_topic = "test/relay";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// ---------- Firebase ----------
+const char* firebaseBaseURL = "https://data-base-310ff-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+// ---------- LED ----------
+const int ledPin = 2;
+
+// ---------- Web Server ----------
+WebServer server(80);
+
+String lastMessage = "NONE";
+String lastFirebase = "NONE";
+String espIP = "192.168.1.13";
+String ledState = "OFF";
+
+// ---------- Setup ----------
+void setup() {
+  pinMode(ledPin, OUTPUT);
+  Serial.begin(115200);
+
+  // ---- Apply Static IP ----
+  WiFi.config(local_IP, gateway, subnet, dns);
+
+  Serial.println("Connecting WiFi...");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+  Serial.print("ESP32 Fixed IP: ");
+  Serial.println(WiFi.localIP());
+
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(mqttCallback);
+
+  // Web Server Route
+  server.on("/", handleWebPage);
+  server.begin();
+  Serial.println("Web Server Started");
+}
+
+// ---------- Loop ----------
+void loop() {
+  if (!client.connected()) reconnectMQTT();
+  client.loop();
+  server.handleClient();
+}
+
+// ---------- MQTT Reconnect ----------
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.print("Connecting MQTT...");
+    if (client.connect("ESP32_Relay_Receiver")) {
+      Serial.println("connected");
+      client.subscribe(mqtt_topic);
+    } else {
+      Serial.print("failed: ");
+      Serial.println(client.state());
+      delay(2000);
+    }
+  }
+}
+
+// ---------- MQTT Callback ----------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+  message.trim();
+  lastMessage = message;
+
+  Serial.println("MQTT Message: " + message);
+
+  if (message == "ON") {
+    digitalWrite(ledPin, HIGH);
+    ledState = "ON";
+  } else {
+    digitalWrite(ledPin, LOW);
+    ledState = "OFF";
+  }
+
+  sendToFirebase(message);
+}
+
+// ---------- Send Firebase ----------
+void sendToFirebase(String state) {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  unsigned long nowMs = millis();
+  String url = String(firebaseBaseURL) + "/relay_log/" + String(nowMs) + ".json";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  String json = "{\"state\":\"" + state + "\",\"timestamp\":" + nowMs + "}";
+
+  int code = http.PUT(json);
+
+  if (code > 0) {
+    lastFirebase = "Updated (" + String(code) + ")";
+  } else {
+    lastFirebase = "Error (" + String(code) + ")";
+  }
+
+  http.end();
+}
+
+// ---------- Web Page ----------
+void handleWebPage() {
+  String html = "<html><body style='font-family:Arial;'>";
+
+  html += "<h2>ESP32 Status Dashboard</h2>";
+  html += "<p><b>ESP32 Fixed IP:</b> 192.168.1.13</p>";
+  html += "<p><b>Last MQTT Message:</b> " + lastMessage + "</p>";
+  html += "<p><b>LED State:</b> " + ledState + "</p>";
+  html += "<p><b>Firebase Status:</b> " + lastFirebase + "</p>";
+
+  html += "<hr><p>Auto-refresh every 3 seconds</p>";
+  html += "<script>setTimeout(()=>{location.reload();},3000);</script>";
+
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
