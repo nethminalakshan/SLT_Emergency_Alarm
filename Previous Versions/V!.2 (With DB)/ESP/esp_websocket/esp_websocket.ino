@@ -6,6 +6,11 @@
 //    • PubSubClient       (Nick O'Leary)
 //    • ArduinoJson        (Benoit Blanchon)  v6 or v7
 //  Board: ESP32 Dev Module  |  Partition: Default 4MB with SPIFFS
+//
+//  Database: InfluxDB v2 (Line Protocol over HTTP)
+//    No extra Arduino library needed — uses built-in HTTPClient.
+//    Events are written to /api/v2/write with a Bearer token.
+//    See InfluxDB_Setup_Guide.md for setup instructions.
 // ============================================================
 
 #include <WiFi.h>
@@ -13,25 +18,40 @@
 #include <PubSubClient.h>
 #include <ESPAsyncWebServer.h>     // replaces WebServer
 #include <ArduinoJson.h>
+#include <time.h>                  // NTP / time functions
 
 // ─────────────────────────────────────────────────────────────
 //  CONFIGURATION  — edit these blocks before flashing
 // ─────────────────────────────────────────────────────────────
 
 // WiFi credentials
-const char* WIFI_SSID     = "Nethmina's Galaxy A53 5G";
-const char* WIFI_PASSWORD = "12345678";
+const char* WIFI_SSID     = "ACCESS DENIED";
+const char* WIFI_PASSWORD = "Power@2026SLT";
 
 // MQTT broker
 const char* MQTT_SERVER   = "broker.hivemq.com";
 const int   MQTT_PORT     = 1883;
 const char* MQTT_CLIENT_ID = "ESP32_LiftDash_v2";
 
-// ── Supabase REST logging endpoint ────────────────────────────
-// Replace with your own project URL + table name + anon key.
-// e.g. https://<project>.supabase.co/rest/v1/lift_events
-const char* DB_ENDPOINT   = "https://<YOUR_PROJECT>.supabase.co/rest/v1/lift_events";
-const char* DB_ANON_KEY   = "Bearer <YOUR_SUPABASE_ANON_KEY>";
+// ── InfluxDB v2 configuration ─────────────────────────────────
+// Host: IP address or hostname of your InfluxDB server
+//       (e.g. "192.168.1.100" for LAN, or your cloud URL without https://)
+// Port: 8086 is the InfluxDB default
+// Org:  The organisation name you chose when setting up InfluxDB
+// Bucket: The bucket (database) to write alarm events into
+// Token: The all-access or write-only API token from InfluxDB UI
+//        See InfluxDB_Setup_Guide.md for step-by-step instructions.
+const char* INFLUX_HOST   = "http://124.43.179.232:8086";       // ← your InfluxDB server IP
+const int   INFLUX_PORT   = 8086;
+const char* INFLUX_ORG    = "SLT";           // ← your org name
+const char* INFLUX_BUCKET = "lift_alarms";          // ← your bucket name
+const char* INFLUX_TOKEN  = "bL2ZGGqiNOqDPEqfe4W5j_4_nef7KjJxSzmRC63ZY5LW0AlF5kGQHYajAO1mALP8NJsHHCZ2TAs7ywyzXZ2Ifg=="; // ← your API token
+
+// NTP configuration (used for accurate timestamps in InfluxDB)
+// Change to a nearby NTP server or your local NTP if needed.
+const char* NTP_SERVER    = "pool.ntp.org";
+const long  GMT_OFFSET_S  = 19800L;  // Sri Lanka = UTC+5:30 (5.5 × 3600)
+const int   DAYLIGHT_S    = 0;       // No daylight saving in Sri Lanka
 
 // ─────────────────────────────────────────────────────────────
 //  PIN DEFINITIONS
@@ -171,39 +191,99 @@ void broadcastUnoEvent(int zone, bool active) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  DATABASE LOGGING — non-blocking HTTP POST to Supabase/Firebase
-//  This runs inside the MQTT callback on the main core; keep it
-//  as fast as possible (use HTTPClient in async-like pattern).
+//  DATABASE LOGGING — HTTP POST to InfluxDB v2 (Line Protocol)
+//
+//  InfluxDB Line Protocol format:
+//    <measurement>[,<tag_key>=<tag_value>...] <field_key>=<field_value>[...] [<timestamp>]
+//
+//  Example written for each event:
+//    lift_events,zone=Lotus\ Side,lift_id=1 status="ON" 1719384000000000000
+//
+//  InfluxDB returns HTTP 204 (No Content) on a successful write.
+//  Tags  (indexed): zone, lift_id, uno_zone
+//  Fields (stored): status (string)
+//  Timestamp: Unix nanoseconds from NTP; falls back to millis()×1e6 if NTP unavailable.
 // ─────────────────────────────────────────────────────────────
 void logEventToDatabase(int zone, int slot, const char* status) {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  // Build ISO-8601 timestamp (epoch-based; requires NTP for accuracy,
-  // falls back to millis() offset if NTP not configured)
-  char tsStr[32];
-  // For production, sync NTP in setup() and use configTime() + getLocalTime()
-  snprintf(tsStr, sizeof(tsStr), "%lu", millis());
+  // ── 1. Get timestamp (nanoseconds) ──────────────────────────
+  uint64_t tsNs = 0;
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    // NTP available — convert to Unix nanoseconds
+    time_t epochSec = mktime(&timeinfo);
+    tsNs = (uint64_t)epochSec * 1000000000ULL;
+  } else {
+    // NTP not yet synced — use millis() as microseconds → nanoseconds
+    tsNs = (uint64_t)millis() * 1000000ULL;
+  }
 
-  // Build JSON body
-  StaticJsonDocument<256> doc;
-  doc["lift_id"]   = LIFT_NUMBER[zone][slot];
-  doc["zone"]      = ZONE_NAMES[zone];
-  doc["status"]    = status;  // "ON" or "OFF"
-  doc["timestamp"] = tsStr;   // replace with ISO string after NTP sync
+  // ── 2. Build InfluxDB Line Protocol string ──────────────────
+  //  Tag values with spaces must escape the space with a backslash.
+  //  We store zone name and lift number as tags (indexed for fast queries),
+  //  and status as a field value (string, must be double-quoted).
+  char zoneSafe[32];  // copy zone name, replace spaces with "\ "
+  const char* src = ZONE_NAMES[zone];
+  int j = 0;
+  for (int i = 0; src[i] && j < 30; i++) {
+    if (src[i] == ' ') zoneSafe[j++] = '\\';
+    zoneSafe[j++] = src[i];
+  }
+  zoneSafe[j] = '\0';
 
-  String body;
-  serializeJson(doc, body);
+  char lineProto[128];
+  // Format: zone_status,zone=<zone> lift1="<status1>",lift2="<status2>" <ts_ns>
+  // Example: zone_status,zone=Lotus\ Side lift1="OK",lift2="OK" 1719384300000000000
+  const char* statusLift1 = liftLatched[zone][0] ? "ALARM" : "OK";
+  const char* statusLift2 = liftLatched[zone][1] ? "ALARM" : "OK";
 
+  snprintf(lineProto, sizeof(lineProto),
+    "zone_status,zone=%s lift1=\"%s\",lift2=\"%s\" %llu",
+    zoneSafe,
+    statusLift1,
+    statusLift2,
+    (unsigned long long)tsNs
+  );
+
+  Serial.printf("[DB] Line Protocol: %s\n", lineProto);
+
+  // ── 3. Build URL: /api/v2/write?org=...&bucket=...&precision=ns ──
+  String hostStr = String(INFLUX_HOST);
+  int hostPort = INFLUX_PORT;
+
+  // Strip http:// or https:// if user included it in INFLUX_HOST
+  bool isHttps = false;
+  if (hostStr.startsWith("http://")) {
+    hostStr = hostStr.substring(7);
+  } else if (hostStr.startsWith("https://")) {
+    hostStr = hostStr.substring(8);
+    isHttps = true;
+  }
+
+  // Strip port if user included it in INFLUX_HOST (e.g. "124.43.179.232:8086")
+  int colonIndex = hostStr.indexOf(':');
+  if (colonIndex != -1) {
+    hostPort = hostStr.substring(colonIndex + 1).toInt();
+    hostStr = hostStr.substring(0, colonIndex);
+  }
+
+  String url = (isHttps ? "https://" : "http://") + hostStr + ":" + String(hostPort) + "/api/v2/write?org=" + String(INFLUX_ORG) + "&bucket=" + String(INFLUX_BUCKET) + "&precision=ns";
+
+  // ── 4. POST via HTTPClient ───────────────────────────────────
   HTTPClient http;
-  http.begin(DB_ENDPOINT);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", DB_ANON_KEY);
-  http.addHeader("apikey", DB_ANON_KEY + 7); // strip "Bearer " prefix for Supabase apikey header
-  http.addHeader("Prefer", "return=minimal"); // Supabase: don't echo body back
+  http.begin(url);
+  http.addHeader("Authorization", String("Token ") + INFLUX_TOKEN);
+  http.addHeader("Content-Type",  "text/plain; charset=utf-8");
+  http.addHeader("Accept",        "application/json");
 
-  int httpCode = http.POST(body);
-  if (httpCode > 0) {
-    Serial.printf("[DB] POST %s → HTTP %d\n", DB_ENDPOINT, httpCode);
+  int httpCode = http.POST(lineProto);
+  if (httpCode == 204) {
+    // 204 No Content = InfluxDB accepted the write successfully
+    Serial.printf("[DB] Write OK (HTTP 204) → bucket=%s\n", INFLUX_BUCKET);
+  } else if (httpCode > 0) {
+    String resp = http.getString();
+    Serial.printf("[DB] Unexpected HTTP %d: %s\n", httpCode, resp.c_str());
   } else {
     Serial.printf("[DB] POST failed: %s\n", http.errorToString(httpCode).c_str());
   }
@@ -284,8 +364,12 @@ void tryReconnectMQTT() {
   if (millis() - lastMqttAttempt < MQTT_RETRY_MS) return;
   lastMqttAttempt = millis();
 
-  Serial.print("[MQTT] Connecting...");
-  if (mqttClient.connect(MQTT_CLIENT_ID)) {
+  // Create a unique client ID using ESP32 MAC address to prevent conflicts on public brokers
+  String clientId = "ESP32_LiftDash_";
+  clientId += String((uint32_t)ESP.getEfuseMac(), HEX);
+
+  Serial.printf("[MQTT] Connecting as %s...", clientId.c_str());
+  if (mqttClient.connect(clientId.c_str())) {
     Serial.println(" connected.");
     mqttClient.subscribe("test/relay/uno1/lift1");
     mqttClient.subscribe("test/relay/uno1/lift2");
@@ -436,11 +520,11 @@ void setup() {
 
   // ── WiFi ──
   Serial.printf("[WiFi] Connecting to %s\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(400);
     Serial.print(".");
-    updateWifiLed();
   }
   Serial.println();
   Serial.println("====================================");
@@ -448,6 +532,24 @@ void setup() {
   Serial.print  ("  Dashboard → http://");
   Serial.println(WiFi.localIP());
   Serial.println("====================================");
+
+  // ── NTP time sync (needed for accurate InfluxDB timestamps) ──
+  configTime(GMT_OFFSET_S, DAYLIGHT_S, NTP_SERVER);
+  Serial.print("[NTP] Syncing time");
+  struct tm timeinfo;
+  int ntpRetries = 0;
+  while (!getLocalTime(&timeinfo) && ntpRetries < 10) {
+    delay(500);
+    Serial.print(".");
+    ntpRetries++;
+  }
+  if (ntpRetries < 10) {
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+    Serial.printf(" OK → %s\n", buf);
+  } else {
+    Serial.println(" TIMEOUT (millis() fallback will be used)");
+  }
 
   // ── MQTT ──
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);

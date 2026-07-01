@@ -1,0 +1,252 @@
+#include <SPI.h>
+#include <Ethernet.h>
+
+// ============================================================
+//  UNO1 — Lotus Side (Lift 1 & 2)
+//  Direct HTTP POST → InfluxDB (no MQTT, no ESP32)
+// ============================================================
+
+// ---------- Ethernet ----------
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x01 };
+IPAddress ip(192, 168, 1, 101);
+EthernetClient ethClient;
+
+// ---------- InfluxDB ----------
+// >>> CHANGE THESE TO MATCH YOUR INFLUXDB SERVER <<<
+const char INFLUX_HOST[] = "124.43.179.232";
+const int  INFLUX_PORT   = 8086;
+const char INFLUX_ORG[]  = "SLT";
+const char INFLUX_BUCKET[] = "Lift_Emergency_Alarm";
+const char INFLUX_TOKEN[]  = "jsEgn9UpR2yTjXaJpSNdwOEow1rnzqMDXPlBuriQaFiq9Mj9X0UIBgu0RN1_kmQMnrCvDojdgM3TYboVSo0D-Q==";
+
+// ---------- Node Identity ----------
+// Tags sent with every data point
+const char NODE_TAG[] = "node1";
+const char LIFT_A[]   = "lift1";
+const char LIFT_B[]   = "lift2";
+
+// ---------- Buttons ----------
+const int liftAPin = A5;
+const int liftBPin = A4;
+
+// ---------- LEDs ----------
+const int LED_POWER = 6;
+const int LED_ETH   = 7;
+
+// ---------- Ethernet LED blink ----------
+const unsigned long ETH_BLINK_MS = 500;
+unsigned long lastEthBlink = 0;
+bool ethLedState = false;
+
+// ---------- Timings ----------
+const unsigned long CHECK_DELAY   = 100;
+const unsigned long HEARTBEAT_MS  = 3000;   // send current state every 3s
+
+// ---------- State ----------
+bool lastA = false;
+bool lastB = false;
+unsigned long lastHeartbeat = 0;
+
+// ============================================================
+//  Send one lift data point to InfluxDB
+//  Line protocol: lift_status,node=nodeX,lift=liftY state=0i
+// ============================================================
+bool sendLiftState(const char* lift, int state) {
+  if (!ethClient.connect(INFLUX_HOST, INFLUX_PORT)) {
+    Serial.println(F("InfluxDB connect failed"));
+    return false;
+  }
+
+  // Build payload in a small buffer
+  // Example: "lift_status,node=node1,lift=lift1 state=1i"
+  int safeState = (state ? 1 : 0);  // clamp to strict 0 or 1
+  char payload[64];
+  sprintf(payload, "lift_status,node=%s,lift=%s state=%di",
+          NODE_TAG, lift, safeState);
+
+  int len = strlen(payload);
+
+  // --- HTTP POST (headers stored in Flash via F()) ---
+  ethClient.print(F("POST /api/v2/write?org="));
+  ethClient.print(INFLUX_ORG);
+  ethClient.print(F("&bucket="));
+  ethClient.print(INFLUX_BUCKET);
+  ethClient.println(F("&precision=s HTTP/1.1"));
+
+  ethClient.print(F("Host: "));
+  ethClient.println(INFLUX_HOST);
+
+  ethClient.print(F("Authorization: Token "));
+  ethClient.println(INFLUX_TOKEN);
+
+  ethClient.println(F("Content-Type: text/plain"));
+
+  ethClient.print(F("Content-Length: "));
+  ethClient.println(len);
+
+  ethClient.println(F("Connection: close"));
+  ethClient.println();  // blank line = end of headers
+  ethClient.print(payload);
+
+  // --- Read response code ---
+  // Wait briefly for server response
+  unsigned long t = millis();
+  while (!ethClient.available() && millis() - t < 1000) { /* wait */ }
+
+  bool ok = false;
+  if (ethClient.available()) {
+    // Read first line of response (e.g. "HTTP/1.1 204 No Content")
+    char respBuf[32];
+    int idx = 0;
+    while (ethClient.available() && idx < 31) {
+      char c = ethClient.read();
+      if (c == '\n') break;
+      respBuf[idx++] = c;
+    }
+    respBuf[idx] = '\0';
+
+    // Check for 204 (success)
+    if (strstr(respBuf, "204")) {
+      ok = true;
+    } else {
+      Serial.print(F("InfluxDB error: "));
+      Serial.println(respBuf);
+    }
+  }
+
+  // Flush remaining data
+  while (ethClient.available()) ethClient.read();
+  ethClient.stop();
+
+  return ok;
+}
+
+// ============================================================
+//  Send both lifts (used for heartbeat)
+// ============================================================
+void sendBothLifts() {
+  if (!ethClient.connect(INFLUX_HOST, INFLUX_PORT)) {
+    Serial.println(F("InfluxDB heartbeat connect failed"));
+    return;
+  }
+
+  // Build two-line payload
+  int safeA = (lastA ? 1 : 0);  // clamp to strict 0 or 1
+  int safeB = (lastB ? 1 : 0);
+  char payload[128];
+  sprintf(payload,
+    "lift_status,node=%s,lift=%s state=%di\n"
+    "lift_status,node=%s,lift=%s state=%di",
+    NODE_TAG, LIFT_A, safeA,
+    NODE_TAG, LIFT_B, safeB);
+
+  int len = strlen(payload);
+
+  ethClient.print(F("POST /api/v2/write?org="));
+  ethClient.print(INFLUX_ORG);
+  ethClient.print(F("&bucket="));
+  ethClient.print(INFLUX_BUCKET);
+  ethClient.println(F("&precision=s HTTP/1.1"));
+
+  ethClient.print(F("Host: "));
+  ethClient.println(INFLUX_HOST);
+
+  ethClient.print(F("Authorization: Token "));
+  ethClient.println(INFLUX_TOKEN);
+
+  ethClient.println(F("Content-Type: text/plain"));
+
+  ethClient.print(F("Content-Length: "));
+  ethClient.println(len);
+
+  ethClient.println(F("Connection: close"));
+  ethClient.println();
+  ethClient.print(payload);
+
+  // Wait and flush response
+  unsigned long t = millis();
+  while (!ethClient.available() && millis() - t < 1000) {}
+  while (ethClient.available()) ethClient.read();
+  ethClient.stop();
+
+  Serial.println(F("Heartbeat sent"));
+}
+
+// ---------- Ethernet LED ----------
+void updateEthernetLed() {
+  if (Ethernet.linkStatus() == LinkON) {
+    digitalWrite(LED_ETH, HIGH);
+    return;
+  }
+  if (millis() - lastEthBlink >= ETH_BLINK_MS) {
+    lastEthBlink = millis();
+    ethLedState = !ethLedState;
+    digitalWrite(LED_ETH, ethLedState);
+  }
+}
+
+// ============================================================
+void setup() {
+  Serial.begin(9600);
+
+  // LEDs
+  pinMode(LED_POWER, OUTPUT);
+  pinMode(LED_ETH, OUTPUT);
+  digitalWrite(LED_POWER, HIGH);
+  digitalWrite(LED_ETH, LOW);
+
+  // Buttons
+  pinMode(liftAPin, INPUT_PULLUP);
+  pinMode(liftBPin, INPUT_PULLUP);
+
+  // Ethernet
+  Serial.println(F("Starting Ethernet..."));
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println(F("DHCP failed, using static IP"));
+    Ethernet.begin(mac, ip);
+  }
+  delay(2000);
+
+  Serial.print(F("UNO1 Lotus IP: "));
+  Serial.println(Ethernet.localIP());
+
+  // Initial states
+  lastA = !digitalRead(liftAPin);
+  lastB = !digitalRead(liftBPin);
+
+  // Send initial state to InfluxDB
+  sendBothLifts();
+}
+
+// ============================================================
+void loop() {
+  updateEthernetLed();
+
+  // ---------- Read buttons ----------
+  bool curA = !digitalRead(liftAPin);
+  bool curB = !digitalRead(liftBPin);
+
+  // ---------- Lift 1 (state change only) ----------
+  if (curA != lastA) {
+    lastA = curA;
+    sendLiftState(LIFT_A, (int)curA);
+    Serial.print(F("Lift1: "));
+    Serial.println(curA ? F("ON") : F("OFF"));
+  }
+
+  // ---------- Lift 2 (state change only) ----------
+  if (curB != lastB) {
+    lastB = curB;
+    sendLiftState(LIFT_B, (int)curB);
+    Serial.print(F("Lift2: "));
+    Serial.println(curB ? F("ON") : F("OFF"));
+  }
+
+  // ---------- Heartbeat ----------
+  if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
+    lastHeartbeat = millis();
+    sendBothLifts();
+  }
+
+  delay(CHECK_DELAY);
+}
