@@ -1,7 +1,7 @@
 # 🚨 SLT Lift Emergency Alarm System
 
 > **SLT Mobitel** — Building Lift Emergency Alarm Monitoring System  
-> **Current Version:** V1.3 (without ESP32)  
+> **Current Version:** V1.3 (without ESP32) + Master Alarm (Raspberry Pi)  
 > **Last Updated:** July 2026
 
 ---
@@ -16,8 +16,9 @@
 6. [Database (InfluxDB) Details](#-database-influxdb-details)
 7. [Network Configuration](#-network-configuration)
 8. [MQTT Topics Reference (V1.0 – V1.2)](#-mqtt-topics-reference-v10--v12)
-9. [Folder Structure](#-folder-structure)
-10. [Troubleshooting](#-troubleshooting)
+9. [Master Alarm System (Raspberry Pi)](#-master-alarm-system-raspberry-pi)
+10. [Folder Structure](#-folder-structure)
+11. [Troubleshooting](#-troubleshooting)
 
 ---
 
@@ -443,6 +444,53 @@ from(bucket: "Lift_Emergency_Alarm")
 
 ---
 
+## 🔔 Master Alarm System (Raspberry Pi)
+
+> 📂 Location: `Master_Alarm/` — [Full documentation](Master_Alarm/README.md)
+
+The Master Alarm system is a Raspberry Pi-based subsystem that reads a **single master alarm boolean** from InfluxDB and drives **two relay-controlled buzzers** located in different parts of the building.
+
+### How It Works
+
+1. The software team analyzes the 6 individual lift alarm states in InfluxDB
+2. They write a single `master_alarm` boolean (`true`/`false`) to the `Lift_Alarm_Status` bucket
+3. The Raspberry Pi polls this boolean every 1 second
+4. If `alarm == true` → both buzzers activate via GPIO relays
+5. If `alarm == false` → both buzzers deactivate
+
+### Hardware
+
+| Component | Details |
+|-----------|---------|
+| Controller | Raspberry Pi 4 or 5 |
+| GPIO17 (Pin 11) | Relay 1 → Buzzer 1 |
+| GPIO27 (Pin 13) | Relay 2 → Buzzer 2 |
+
+### Quick Commands
+
+```bash
+# Install
+cd Master_Alarm && sudo ./scripts/install.sh
+
+# Start service
+sudo systemctl start slt-master-alarm
+
+# View logs
+journalctl -u slt-master-alarm -f
+```
+
+### Key Features
+
+- 1-second polling with state-change detection
+- Automatic reconnection with exponential backoff
+- systemd auto-start on boot (`Restart=always`)
+- Dual logging (journal + rotating file)
+- Comprehensive error handling — never crashes
+
+For complete setup instructions, see [Master_Alarm/README.md](Master_Alarm/README.md).
+
+---
+
 ## 📁 Folder Structure
 
 ```
@@ -450,7 +498,32 @@ SLT_Emergency_Alarm/
 │
 ├── README.md                              ← You are here
 │
-├── V1.3 (without ESP32)/                  ← 🟢 CURRENT VERSION
+├── Master_Alarm/                          ← 🔔 MASTER ALARM (Raspberry Pi)
+│   ├── README.md                          ← Setup & deployment guide
+│   ├── config/
+│   │   └── config.yaml                   ← All configurable parameters
+│   ├── src/
+│   │   ├── main.py                       ← Application entry point
+│   │   ├── config_loader.py              ← YAML config + validation
+│   │   ├── influxdb_client_wrapper.py    ← InfluxDB connection & query
+│   │   ├── gpio_controller.py            ← GPIO relay control
+│   │   ├── alarm_monitor.py              ← Main polling loop
+│   │   └── logger_setup.py               ← Centralized logging
+│   ├── service/
+│   │   └── slt-master-alarm.service      ← systemd auto-start
+│   ├── scripts/
+│   │   ├── install.sh                    ← Automated installer
+│   │   └── test_gpio.py                  ← GPIO hardware test
+│   ├── docs/
+│   │   ├── architecture.md               ← System architecture
+│   │   ├── wiring_diagram.md             ← Hardware wiring guide
+│   │   ├── testing_guide.md              ← Test procedures
+│   │   ├── deployment_guide.md           ← Production deployment
+│   │   └── future_improvements.md        ← Roadmap
+│   ├── requirements.txt                  ← Python dependencies
+│   └── .env.example                      ← Environment variable template
+│
+├── V1.3 (without ESP32)/                  ← 🟢 CURRENT VERSION (Arduino)
 │   └── Uno/
 │       ├── db_details                     ← InfluxDB connection details
 │       ├── Lotus_lift_1_2/

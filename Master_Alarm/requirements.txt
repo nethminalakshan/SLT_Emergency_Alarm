@@ -1,0 +1,14 @@
+# =============================================================================
+# SLT Lift Master Alarm System — Python Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# InfluxDB v2 client for querying the master alarm status
+influxdb-client>=1.36.0
+
+# YAML configuration file parser
+PyYAML>=6.0
+
+# Raspberry Pi GPIO control (pre-installed on RPi OS, listed for venv compatibility)
+RPi.GPIO>=0.7.1
