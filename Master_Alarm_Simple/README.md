@@ -6,8 +6,8 @@ Reads the `master_alarm` boolean from InfluxDB and drives two buzzer relays via 
 
 | RPi Pin | → | Device |
 |---------|---|--------|
-| GPIO17 (Pin 11) | → | Relay 1 → Buzzer 1 |
-| GPIO27 (Pin 13) | → | Relay 2 → Buzzer 2 |
+| GPIO12 (Pin 32) | → | Relay 1 → Buzzer 1 |
+| GPIO16 (Pin 36) | → | Relay 2 → Buzzer 2 |
 | 5V (Pin 2) | → | Relay VCC |
 | GND (Pin 6) | → | Relay GND |
 
@@ -44,8 +44,8 @@ Edit the constants at the top of `master_alarm.py`:
 | `INFLUXDB_URL` | `http://124.43.179.232:8086` | InfluxDB server |
 | `INFLUXDB_ORG` | `SLT` | Organisation |
 | `INFLUXDB_BUCKET` | `Lift_Alarm_Status` | Bucket name |
-| `BUZZER_1_PIN` | `17` | BCM pin for buzzer 1 |
-| `BUZZER_2_PIN` | `27` | BCM pin for buzzer 2 |
+| `BUZZER_1_PIN` | `12` | BCM pin for buzzer 1 |
+| `BUZZER_2_PIN` | `16` | BCM pin for buzzer 2 |
 | `ACTIVE_HIGH` | `True` | `True` for active-HIGH relays |
 | `POLL_INTERVAL` | `1` | Seconds between polls |
 
