@@ -12,6 +12,7 @@ INFLUXDB_ORG         = "SLT"
 INFLUXDB_BUCKET      = "Lift_Alarm_Status"
 INFLUXDB_MEASUREMENT = "master_alarm"
 INFLUXDB_FIELD       = "alarm"
+INFLUXDB_TOKEN       = "uuMjeruz55R_yGlhcMI1r2dZVGqUzcxSorC_aBu0jRrQXQ7cZX-OStRHoOTmG-1Gr4_Z7kKcwsPzSQINweI-UA=="
 
 BUZZER_1_PIN  = 12   # BCM GPIO 12
 BUZZER_2_PIN  = 16   # BCM GPIO 16
@@ -48,9 +49,8 @@ def set_buzzers(on):
     logging.info("🔴 BUZZERS ON" if on else "🟢 BUZZERS OFF")
 
 def main():
-    token = os.environ.get("INFLUXDB_TOKEN")
-    if not token:
-        logging.error("INFLUXDB_TOKEN environment variable not set.")
+    if not INFLUXDB_TOKEN:
+        logging.error("INFLUXDB_TOKEN is empty! Please set it in the configuration.")
         sys.exit(1)
 
     query = (
@@ -60,7 +60,7 @@ def main():
         f'|> last()'
     )
 
-    client = InfluxDBClient(url=INFLUXDB_URL, token=token, org=INFLUXDB_ORG, timeout=10000)
+    client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=10000)
     query_api = client.query_api()
     
     set_buzzers(False)
