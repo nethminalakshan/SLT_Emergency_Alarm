@@ -11,7 +11,22 @@ Reads the `master_alarm` boolean from InfluxDB and drives two buzzer relays via 
 | 5V (Pin 2) | → | Relay VCC |
 | GND (Pin 6) | → | Relay GND |
 
-## Install (on Raspberry Pi)
+## Quick Start (Run Directly)
+
+You can run the script directly on your Raspberry Pi without installing it as a service:
+
+```bash
+# 1. Install the required InfluxDB client library
+pip3 install influxdb-client
+
+# 2. Set your InfluxDB API token
+export INFLUXDB_TOKEN="your_token_here"
+
+# 3. Run the script
+python3 master_alarm.py
+```
+
+## Install as a Background Service (Optional)
 
 ```bash
 cd Master_Alarm_Simple
@@ -54,8 +69,8 @@ The InfluxDB token is set via the `INFLUXDB_TOKEN` environment variable (configu
 ## How It Works
 
 ```
-InfluxDB ──(HTTP 1s poll)──▶ master_alarm.py ──▶ GPIO17 → Buzzer 1
-                                               └──▶ GPIO27 → Buzzer 2
+InfluxDB ──(HTTP 1s poll)──▶ master_alarm.py ──▶ GPIO12 → Buzzer 1
+                                               └──▶ GPIO16 → Buzzer 2
 
 alarm == true  → buzzers ON
 alarm == false → buzzers OFF

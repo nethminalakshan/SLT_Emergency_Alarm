@@ -9,7 +9,7 @@ User=pi
 Group=gpio
 WorkingDirectory=/opt/slt-master-alarm
 ExecStart=/opt/slt-master-alarm/venv/bin/python -u master_alarm.py
-Environment=INFLUXDB_TOKEN=your-token-here
+Environment=INFLUXDB_TOKEN=uuMjeruz55R_yGlhcMI1r2dZVGqUzcxSorC_aBu0jRrQXQ7cZX-OStRHoOTmG-1Gr4_Z7kKcwsPzSQINweI-UA==
 Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=10

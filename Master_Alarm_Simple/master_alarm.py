@@ -1,228 +1,106 @@
 #!/usr/bin/env python3
-"""
-SLT Lift Master Alarm — Simple Single-File Version
-Polls InfluxDB for the master_alarm boolean and drives two buzzer relays via GPIO.
-"""
-
 import os
 import sys
 import time
 import signal
 import logging
-
 from influxdb_client import InfluxDBClient
-from influxdb_client.client.exceptions import InfluxDBError
-from urllib3.exceptions import HTTPError
 
-# =============================================================================
-# CONFIGURATION — Edit these values to match your setup
-# =============================================================================
-INFLUXDB_URL        = "http://124.43.179.232:8086"
-INFLUXDB_ORG        = "SLT"
-INFLUXDB_BUCKET     = "Lift_Alarm_Status"
+# --- CONFIGURATION ---
+INFLUXDB_URL         = "http://124.43.179.232:8086"
+INFLUXDB_ORG         = "SLT"
+INFLUXDB_BUCKET      = "Lift_Alarm_Status"
 INFLUXDB_MEASUREMENT = "master_alarm"
-INFLUXDB_FIELD      = "alarm"
+INFLUXDB_FIELD       = "alarm"
 
-BUZZER_1_PIN = 12   # BCM GPIO12 (Pin 32) → Relay 1 → Buzzer 1
-BUZZER_2_PIN = 16   # BCM GPIO16 (Pin 36) → Relay 2 → Buzzer 2
-ACTIVE_HIGH  = True # True = GPIO HIGH activates relay
+BUZZER_1_PIN  = 12   # BCM GPIO 12
+BUZZER_2_PIN  = 16   # BCM GPIO 16
+ACTIVE_HIGH   = True # Set to False if your 5V relay triggers on LOW
+POLL_INTERVAL = 1
 
-POLL_INTERVAL = 1   # Seconds between InfluxDB queries
-RETRY_DELAY   = 5   # Seconds before reconnect attempt
-MAX_AUTH_RETRY_DELAY = 300  # Max backoff for auth errors (5 min)
-# =============================================================================
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(message)s")
 
-# --- Logging (console only — systemd journal captures it) ---
-logging.basicConfig(
-    format="%(asctime)s — %(levelname)-8s — %(name)s — %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
-log = logging.getLogger("slt_master_alarm")
-
-
-class AuthError(Exception):
-    """Raised when InfluxDB returns 401/403 — token is invalid or lacks permissions."""
-    pass
-
-
-# --- GPIO setup ---
+# --- GPIO SETUP ---
 try:
     import RPi.GPIO as GPIO
     GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(BUZZER_1_PIN, GPIO.OUT)
     GPIO.setup(BUZZER_2_PIN, GPIO.OUT)
-    SIMULATION = False
-    log.info("GPIO ready — pins %d, %d", BUZZER_1_PIN, BUZZER_2_PIN)
-except (ImportError, RuntimeError):
+    logging.info(f"GPIO ready on pins {BUZZER_1_PIN} and {BUZZER_2_PIN}")
+except ImportError:
     GPIO = None
-    SIMULATION = True
-    log.warning("RPi.GPIO not available — SIMULATION mode")
+    logging.warning("RPi.GPIO not found. Running in simulation mode.")
 
-# --- State ---
 running = True
-alarm_active = None  # None = unknown, True/False = last known state
+def shutdown(signum, frame):
+    global running
+    running = False
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
 
-
-def set_buzzers(on: bool):
-    """Turn both buzzer relays ON or OFF."""
-    level = on if ACTIVE_HIGH else (not on)
-    if not SIMULATION:
+def set_buzzers(on):
+    level = on if ACTIVE_HIGH else not on
+    if GPIO:
         GPIO.output(BUZZER_1_PIN, level)
         GPIO.output(BUZZER_2_PIN, level)
-    tag = "ON" if on else "OFF"
-    log.info("🔴 BUZZERS %s" if on else "🟢 BUZZERS %s", tag)
-
-
-def build_query() -> str:
-    return (
-        f'from(bucket: "{INFLUXDB_BUCKET}")\n'
-        f"  |> range(start: -5m)\n"
-        f'  |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")\n'
-        f'  |> filter(fn: (r) => r._field == "{INFLUXDB_FIELD}")\n'
-        f"  |> last()"
-    )
-
-
-def _is_auth_error(exc: Exception) -> bool:
-    """Check if an exception is an authentication/authorization error."""
-    # InfluxDB client raises ApiException with a .status attribute
-    status = getattr(exc, "status", None)
-    if status in (401, 403):
-        return True
-    err_str = str(exc).lower()
-    if "(401)" in err_str or "(403)" in err_str:
-        return True
-    if "unauthorized" in err_str or "forbidden" in err_str:
-        return True
-    return False
-
-
-def query_alarm(query_api, flux_query) -> bool | None:
-    """Query InfluxDB and return True/False/None.
-
-    Raises AuthError for 401/403 so the caller can handle it differently
-    from transient network errors.
-    """
-    try:
-        tables = query_api.query(flux_query)
-        for table in tables:
-            for record in table.records:
-                val = record.get_value()
-                if isinstance(val, bool):
-                    return val
-                if isinstance(val, (int, float)):
-                    return bool(val)
-                if isinstance(val, str):
-                    return val.lower() in ("true", "1", "yes")
-                return False
-        return None  # no data
-    except Exception as e:
-        if _is_auth_error(e):
-            raise AuthError(str(e)) from e
-        log.error("InfluxDB query error: %s", e)
-        raise  # re-raise so the poll loop reconnects
-
-
-def shutdown(signum, _frame):
-    global running
-    log.info("Received %s — shutting down", signal.Signals(signum).name)
-    running = False
-
-
-def connect_influxdb(token: str):
-    """Create an InfluxDB client and verify connectivity.
-
-    Returns (client, query_api) on success.
-    Raises on failure.
-    """
-    client = InfluxDBClient(
-        url=INFLUXDB_URL, token=token, org=INFLUXDB_ORG, timeout=10_000
-    )
-    health = client.health()
-    if health.status != "pass":
-        client.close()
-        raise ConnectionError(health.message)
-    query_api = client.query_api()
-    log.info("✅ Connected to InfluxDB successfully. Server version: v%s", health.version)
-    return client, query_api
-
+    logging.info("🔴 BUZZERS ON" if on else "🟢 BUZZERS OFF")
 
 def main():
-    global alarm_active
-
-    # --- Token check ---
     token = os.environ.get("INFLUXDB_TOKEN")
     if not token:
-        log.critical("INFLUXDB_TOKEN env var not set. Exiting.")
+        logging.error("INFLUXDB_TOKEN environment variable not set.")
         sys.exit(1)
 
-    # --- Signal handlers ---
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
+    query = (
+        f'from(bucket: "{INFLUXDB_BUCKET}") '
+        f'|> range(start: -5m) '
+        f'|> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}" and r._field == "{INFLUXDB_FIELD}") '
+        f'|> last()'
+    )
 
-    # --- Ensure buzzers start OFF ---
+    client = InfluxDBClient(url=INFLUXDB_URL, token=token, org=INFLUXDB_ORG, timeout=10000)
+    query_api = client.query_api()
+    
     set_buzzers(False)
-    alarm_active = False
+    last_state = False
 
-    flux_query = build_query()
-    log.info("Master Alarm started — polling %s every %ds", INFLUXDB_URL, POLL_INTERVAL)
-
-    consecutive_auth_failures = 0
-
+    logging.info(f"Connecting to InfluxDB at {INFLUXDB_URL}...")
+    
     while running:
-        # --- Connect ---
-        client = None
         try:
-            log.info("Connecting to InfluxDB at %s (attempt %d)...",
-                      INFLUXDB_URL, consecutive_auth_failures + 1)
-            client, query_api = connect_influxdb(token)
-        except Exception as e:
-            log.error("Connection failed: %s — retrying in %ds", e, RETRY_DELAY)
-            time.sleep(RETRY_DELAY)
-            continue
+            tables = query_api.query(query)
+            current_state = False
+            
+            for table in tables:
+                for record in table.records:
+                    val = record.get_value()
+                    if isinstance(val, str):
+                        current_state = val.lower() in ("true", "1", "yes")
+                    else:
+                        current_state = bool(val)
 
-        # --- Poll loop ---
-        try:
-            while running:
-                val = query_alarm(query_api, flux_query)
-                # Reset auth failure counter on successful query
-                consecutive_auth_failures = 0
-                if val is not None and val != alarm_active:
-                    alarm_active = val
-                    set_buzzers(val)
-                time.sleep(POLL_INTERVAL)
-
-        except AuthError as e:
-            consecutive_auth_failures += 1
-            backoff = min(RETRY_DELAY * (2 ** consecutive_auth_failures),
-                          MAX_AUTH_RETRY_DELAY)
-            log.error("🔑 Authentication failed (attempt %d): %s",
-                      consecutive_auth_failures, e)
-            log.error("Token is invalid or lacks read access to bucket '%s'. "
-                      "Please check your INFLUXDB_TOKEN.", INFLUXDB_BUCKET)
-            log.warning("Retrying in %ds (will keep trying in case token is "
-                        "updated via env reload)...", backoff)
-            time.sleep(backoff)
+            if current_state != last_state:
+                set_buzzers(current_state)
+                last_state = current_state
 
         except Exception as e:
-            consecutive_auth_failures = 0
-            log.warning("Connection lost — attempting to reconnect...")
+            err_msg = str(e).lower()
+            if "401" in err_msg or "unauthorized" in err_msg:
+                logging.error(f"InfluxDB Auth Error! Check INFLUXDB_TOKEN for bucket '{INFLUXDB_BUCKET}'.")
+                time.sleep(10) # Wait longer if token is bad
+            else:
+                logging.error(f"Connection error: {e}. Reconnecting...")
+                time.sleep(2)
+        
+        time.sleep(POLL_INTERVAL)
 
-        finally:
-            if client:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-    # --- Cleanup ---
     set_buzzers(False)
-    if not SIMULATION:
+    if GPIO:
         GPIO.cleanup()
-    log.info("Master Alarm stopped.")
-
+    client.close()
+    logging.info("Master Alarm stopped.")
 
 if __name__ == "__main__":
     main()
