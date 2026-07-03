@@ -1,3 +1,4 @@
+#lift master alarm
 #!/usr/bin/env python3
 import os
 import sys
@@ -24,15 +25,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s — %(message)s")
 
 # --- GPIO SETUP ---
 try:
-    import RPi.GPIO as GPIO
-    GPIO.setwarnings(False)
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(BUZZER_1_PIN, GPIO.OUT)
-    GPIO.setup(BUZZER_2_PIN, GPIO.OUT)
-    logging.info(f"GPIO ready on pins {BUZZER_1_PIN} and {BUZZER_2_PIN}")
-except ImportError:
-    GPIO = None
-    logging.warning("RPi.GPIO not found. Running in simulation mode.")
+    from gpiozero import DigitalOutputDevice
+    
+    # Configure the pins. active_high and initial_value are native to gpiozero
+    buzzer1 = DigitalOutputDevice(BUZZER_1_PIN, active_high=ACTIVE_HIGH, initial_value=False)
+    buzzer2 = DigitalOutputDevice(BUZZER_2_PIN, active_high=ACTIVE_HIGH, initial_value=False)
+    
+    GPIO_AVAILABLE = True
+    logging.info(f"GPIO ready on pins {BUZZER_1_PIN} and {BUZZER_2_PIN} (using gpiozero)")
+except Exception as e:
+    GPIO_AVAILABLE = False
+    logging.warning(f"Could not initialize GPIO ({e}). Running in simulation mode.")
 
 running = True
 def shutdown(signum, frame):
@@ -42,10 +45,13 @@ signal.signal(signal.SIGINT, shutdown)
 signal.signal(signal.SIGTERM, shutdown)
 
 def set_buzzers(on):
-    level = on if ACTIVE_HIGH else not on
-    if GPIO:
-        GPIO.output(BUZZER_1_PIN, level)
-        GPIO.output(BUZZER_2_PIN, level)
+    if GPIO_AVAILABLE:
+        if on:
+            buzzer1.on()
+            buzzer2.on()
+        else:
+            buzzer1.off()
+            buzzer2.off()
     logging.info("🔴 BUZZERS ON" if on else "🟢 BUZZERS OFF")
 
 def main():
@@ -86,6 +92,12 @@ def main():
                 last_state = current_state
 
         except Exception as e:
+            # If the connection fails, force buzzers to turn OFF for safety.
+            if last_state != False:
+                logging.warning("Connection lost! Forcing buzzers OFF.")
+                set_buzzers(False)
+                last_state = False
+
             err_msg = str(e).lower()
             if "401" in err_msg or "unauthorized" in err_msg:
                 logging.error(f"InfluxDB Auth Error! Check INFLUXDB_TOKEN for bucket '{INFLUXDB_BUCKET}'.")
@@ -97,8 +109,9 @@ def main():
         time.sleep(POLL_INTERVAL)
 
     set_buzzers(False)
-    if GPIO:
-        GPIO.cleanup()
+    if GPIO_AVAILABLE:
+        buzzer1.close()
+        buzzer2.close()
     client.close()
     logging.info("Master Alarm stopped.")
 
